@@ -13,45 +13,130 @@ permissions:
 
 jobs:
   build:
+    name: Build APK
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Extract source archive
+      - name: Check source archive
         run: |
-          mkdir source
+          if [ ! -f source.zip ]; then
+            echo "ERROR: source.zip tidak ditemukan di root repository."
+            exit 1
+          fi
+
+      - name: Extract Android project
+        run: |
+          mkdir -p source
           unzip -q source.zip -d source
 
       - name: Find Android project
+        shell: bash
         run: |
-          SETTINGS=$(find source -type f \( -name settings.gradle -o -name settings.gradle.kts \) -print -quit)
+          SETTINGS=$(find source -type f \
+            \( -name settings.gradle -o -name settings.gradle.kts \) \
+            -print -quit)
+
           if [ -z "$SETTINGS" ]; then
-            echo "ERROR: File settings.gradle tidak ditemukan"
+            echo "ERROR: settings.gradle tidak ditemukan."
+            echo "Periksa isi source.zip."
             exit 1
           fi
-          echo "PROJECT_DIR=$(dirname "$SETTINGS")" >> "$GITHUB_ENV"
 
-      - name: Set up Java
+          PROJECT_DIR="$(dirname "$SETTINGS")"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Proyek ditemukan: $PROJECT_DIR"
+
+      - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Gradle
+      - name: Set up Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
 
-      - name: Build APK
+      - name: Align Java and Kotlin targets
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          project = Path(os.environ["PROJECT_DIR"])
+          files = [
+              project / "app" / "build.gradle",
+              project / "app" / "build.gradle.kts",
+          ]
+
+          gradle_file = next((p for p in files if p.is_file()), None)
+
+          if gradle_file is None:
+              raise SystemExit(
+                  "ERROR: app/build.gradle atau app/build.gradle.kts tidak ditemukan."
+              )
+
+          text = gradle_file.read_text()
+
+          text = re.sub(
+              r'JavaVersion\.VERSION_1_8',
+              'JavaVersion.VERSION_17',
+              text
+          )
+
+          text = re.sub(
+              r'JavaVersion\.VERSION_1_7',
+              'JavaVersion.VERSION_17',
+              text
+          )
+
+          text = re.sub(
+              r'(sourceCompatibility|targetCompatibility)(\s*=\s*|\s+)["\']1\.[78]["\']',
+              r'\1\2JavaVersion.VERSION_17',
+              text
+          )
+
+          text = re.sub(
+              r'jvmTarget\s*=\s*["\']1\.[78]["\']',
+              'jvmTarget = "17"',
+              text
+          )
+
+          gradle_file.write_text(text)
+          print(f"Konfigurasi diperiksa: {gradle_file}")
+          PY
+
+      - name: Build debug APK
+        shell: bash
         run: |
           cd "$PROJECT_DIR"
           gradle assembleDebug --no-daemon
 
-      - name: Upload APK
+      - name: Collect APK
+        shell: bash
+        run: |
+          APK=$(find "$PROJECT_DIR" -type f \
+            -path '*/build/outputs/apk/debug/*.apk' \
+            -print -quit)
+
+          if [ -z "$APK" ]; then
+            echo "ERROR: APK tidak ditemukan setelah build."
+            exit 1
+          fi
+
+          cp "$APK" "$GITHUB_WORKSPACE/RX-TOOLS-debug.apk"
+          echo "APK berhasil ditemukan."
+
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: RX-TOOLS-debug-APK
-          path: '**/build/outputs/apk/debug/*.apk'
+          path: RX-TOOLS-debug.apk
           if-no-files-found: error
+          retention-days: 7
           
